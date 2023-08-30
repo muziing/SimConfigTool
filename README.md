@@ -1,5 +1,8 @@
 # SCT - 综合 Simulink 仿真配置工具
 
+![GitHub Repo Stars](https://img.shields.io/github/stars/muziing/SimConfigTool)
+[![License](https://img.shields.io/github/license/muziing/SimConfigTool)](https://github.com/muziing/SimConfigTool/blob/main/LICENSE)
+![GitHub Last Commit](https://img.shields.io/github/last-commit/muziing/SimConfigTool)
 ![MATLAB Version](https://img.shields.io/badge/MATLAB-R2022b-blue)
 
 ## 简介
