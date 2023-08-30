@@ -35,3 +35,9 @@ codegen/
 octave-workspace
 
 # End of https://www.toptal.com/developers/gitignore/api/matlab
+
+# 打包工程文件
+*.prj
+
+# 打包临时文件
+src/*_resources/
