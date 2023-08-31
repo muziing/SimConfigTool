@@ -1,4 +1,8 @@
 classdef SimConfigTool_exported < matlab.apps.AppBase
+    %SIMCONFIGTOOL_EXPORTED 综合Simulink仿真任务配置工具
+    %   以图形化方式集成了选择模型、选择数据文件、参数扫描、调整仿真模式与停止时间、
+    %   并行仿真、快捷后处理等仿真常用功能。无需修改模型文件即可实现绝大多数仿真需求。
+    %   author: muzing <muzi2001@foxmail.com>
 
     % Properties that correspond to app components
     properties (Access = public)
@@ -6,10 +10,10 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
         MenuFile                       matlab.ui.container.Menu
         OpenSimulinkFileMenu           matlab.ui.container.Menu
         Quit                           matlab.ui.container.Menu
+        Menu                           matlab.ui.container.Menu
         MenuHelp                       matlab.ui.container.Menu
         HelpMenu                       matlab.ui.container.Menu
         AboutMenu                      matlab.ui.container.Menu
-        Menu                           matlab.ui.container.Menu
         GridLayout6                    matlab.ui.container.GridLayout
         StatusBarLabel                 matlab.ui.control.Label
         TabGroup                       matlab.ui.container.TabGroup
@@ -66,10 +70,6 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
         ExportSimInButton              matlab.ui.control.Button
     end
 
-    % Simulink仿真任务配置工具
-    % 以图形化方式集成了选择模型、选择数据文件、参数扫描、调整仿真模式与停止时间、
-    % 并行仿真、快捷后处理等仿真常用功能。无需修改模型文件即可实现绝大多数仿真需求。
-    % author: muzing <muzi2001@foxmail.com>
 
     properties (Access = private)
         easyPostProceResultPath = '' % 快捷后处理结果存储路径
@@ -94,6 +94,58 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
     end
 
     methods (Access = private)
+
+        function loadModelParam(app)
+            %% 从模型中读取加载参数信息
+
+            % 加载模型工作区、获取其中存储的所有变量
+            modelWorkeSpace = get_param(app.simulinkModelFile, 'ModelWorkspace');
+            mdlWsVariables = whos(modelWorkeSpace);
+
+            paramVariableIndex = zeros(length(mdlWsVariables), 1);
+            for index = 1:length(mdlWsVariables)
+                if startsWith(mdlWsVariables(index).name, app.paramPrefix)
+                    paramVariableIndex(index) = index;
+                end
+            end
+            paramVariableIndex = paramVariableIndex(paramVariableIndex~=0);
+
+            paramVariables = mdlWsVariables(paramVariableIndex); % 结构体数组
+
+            if isempty(paramVariables)
+                uialert(app.UIFigure, "在该 Simulink 模型工作区中找不到参数变量。" + ...
+                    "请重新选择其他模型文件，或根据帮助文档提示修改模型", ...
+                    '错误', 'Icon', 'error');
+                app.showStatusText(['已加载模型 ', app.simulinkModelFile, ...
+                    '，但有错误']);
+                return
+            end
+
+            paramNames = strings(length(paramVariables), 1);
+            paramDefVals = zeros(length(paramVariables), 1);
+            for index=1:length(paramVariables)
+                % 获取参数名
+                paramNames(index) = erase(paramVariables(index).name, app.paramPrefix);
+                % 获取存储在模型工作区的参数默认值
+                paramDefVals(index) = getVariable(modelWorkeSpace, ...
+                    paramVariables(index).name);
+            end
+
+            % 将参数名添加到选择器下拉控件
+            app.ParamSelector.Items = paramNames;
+
+            % 创建参数数据表与处理参数UI表
+            app.paramAllTable = table(paramDefVals, paramDefVals, ...
+                ones(length(paramNames), 1), false(length(paramNames), 1), ...
+                'RowName', paramNames);
+            app.paramAllTable.Properties.VariableNames = ["min", "max", ...
+                "step", "isToSweep"];
+            app.ParamUITable.RowName = app.paramAllTable.Properties.RowNames;
+            app.paramTableUpdated();
+
+            % 用参数的默认值更新最小/最大/步长输入框
+            app.ParamSelectorValueChanged();
+        end
 
         function paramTableUpdated(app)
             %% 每当参数数据表格被更新，就应调用一次此函数
@@ -128,8 +180,6 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
         function makeSimIn(app)
             %% 构造 SimulationInput 对象，配置参数设置
 
-            % 先将旧的simIn变量设置为空SimulationInput对象，再创建新的
-            % 防止多次调用（用户重复点击"完成配置"）时还保留先前配置的后若干项simIn
             app.simIn = Simulink.SimulationInput;
             app.simIn(1:app.paramCombinationSum) = Simulink.SimulationInput(...
                 app.simulinkModelFile);
@@ -138,13 +188,37 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
                 % 该模型中没有任何算法参数的情况
                 return
             end
+        end
 
-            % 只包含固定参数/只包含待扫描参数的子表
-            paramConstTable = app.paramAllTable(~app.paramAllTable.isToSweep, :);
-            paramToSweepTable = app.paramAllTable(app.paramAllTable.isToSweep, :);
+        function setSimIn(app)
+            %% 设置 app.simIn 对象的其他非参数属性
+            % 由于在界面上此部分功能与参数设置功能分属不同区域，故在函数实现上亦
+            % 独立于 app.setSimInParam()
+            
+            % 建立UI上仿真模式中文文本与 'SimulationMode' 参数值之间的映射关系
+            simModeMap = containers.Map(["普通", "加速", "快速加速"], ...
+                ["normal", "accelerator", "rapid-accelerator"]);
 
+            for index = 1:length(app.simIn)
+
+                % 设置仿真结束时间
+                if app.simStopTime ~= "-1" % "-1"为特殊值，表示使用模型文件中保存的仿真停止时间
+                    app.simIn(index) = app.simIn(index).setModelParameter(...
+                        "StopTime", app.simStopTime);
+                end
+
+                % 设置仿真模式
+                app.simIn(index) = app.simIn(index).setModelParameter('SimulationMode', ...
+                    convertStringsToChars(simModeMap(app.SimModeDropDown.Value)));
+            end
+        end
+
+        function setSimInConstParam(app)
             %% 设置 SimulationInput 对象中非扫描参数
-            for simInIndex = 1:app.paramCombinationSum
+
+            paramConstTable = app.paramAllTable(~app.paramAllTable.isToSweep, :);
+
+            for simInIndex = 1:length(app.simIn)
                 % 设置非扫描参数
                 for paramIndex = 1:height(paramConstTable)
                     variableName = [app.paramPrefix, ...
@@ -153,66 +227,15 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
                         variableName, paramConstTable.max(paramIndex), 'Workspace', ...
                         app.simulinkModelFile);
                 end
-
             end
+        end
 
-            %% 设置扫描参数（SimulationInput 对象中不同的部分）
+        function setSimInParam(app)
+            %% 设置 SimulationInput 中的算法参数
 
-            % 为扫描参数建数据表 paramSweepValueTable，保存用户设置的参数组
-            paramSweepValueArray = {0;0;0;0;0};
-            rowNameArray = {'row_1', 'row_2', 'row_3', 'row_4', 'row_5'};
-
-            for rowNum = 1:height(paramToSweepTable)
-                paramSweepValueArray(rowNum) = {paramToSweepTable(rowNum, :).min:...
-                    paramToSweepTable(rowNum,:).step...
-                    :paramToSweepTable(rowNum, :).max};
-                rowNameArray(rowNum) = paramToSweepTable.Properties.RowNames(rowNum);
-            end
-
-            paramSweepValueTable = table(paramSweepValueArray, ...
-                'RowName', rowNameArray);
-
-            simInIndex = 1;
-
-            for inner1 = 1:length(paramSweepValueTable(1, :).paramSweepValueArray{1})
-                for inner2 = 1:length(paramSweepValueTable(2, :).paramSweepValueArray{1})
-                    for inner3 = 1:length(paramSweepValueTable(3, :).paramSweepValueArray{1})
-                        for inner4 = 1:length(paramSweepValueTable(4, :).paramSweepValueArray{1})
-                            for inner5 = 1:length(paramSweepValueTable(5, :).paramSweepValueArray{1})
-
-                                % 使用"基于变量生成字段名称"技巧，在更内一层循环中
-                                % 用 pIndexStruct.(['inner', num2str(paramIndex)])
-                                % 拼接出真正需要的索引值
-                                pIndexStruct.inner1 = inner1;
-                                pIndexStruct.inner2 = inner2;
-                                pIndexStruct.inner3 = inner3;
-                                pIndexStruct.inner4 = inner4;
-                                pIndexStruct.inner5 = inner5;
-
-                                for paramIndex = 1:height(paramToSweepTable)
-                                    % 此层循环实际执行次数只由扫描参数个数决定
-
-                                    variableName = [app.paramPrefix, ...
-                                        paramToSweepTable.Properties.RowNames{paramIndex}];
-
-                                    pIndex = pIndexStruct.(['inner', ...
-                                        num2str(paramIndex)]);
-                                    paramValue = paramSweepValueTable(...
-                                        paramIndex,:).paramSweepValueArray{1}(...
-                                        pIndex);
-
-                                    app.simIn(simInIndex) = app.simIn(simInIndex).setVariable(...
-                                        variableName, paramValue, 'Workspace', ...
-                                        app.simulinkModelFile);
-
-                                end
-
-                                simInIndex = simInIndex + 1;
-                            end
-                        end
-                    end
-                end
-            end
+            app.setSimInConstParam();
+            paramToSweepTable = app.paramAllTable(app.paramAllTable.isToSweep, :);
+            app.simIn = setSimInSweepParam(app.simIn, paramToSweepTable, app.paramPrefix);
 
             try
                 validate(app.simIn);
@@ -227,33 +250,15 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
                 % 如果存在参数组浏览器，则刷新其界面
                 app.paramSetBrowserApp.getParamSets();
             end
-
         end
-
-        function setSimIn(app)
-            %% 设置 app.simIn 对象的其他非参数属性
-            
-            simModeMap = containers.Map(["普通", "加速", "快速加速"], ...
-                ["normal", "accelerator", "rapid-accelerator"]);
-
-            for index = 1:app.paramCombinationSum
-
-                % 设置仿真结束时间
-                if app.simStopTime ~= "-1" % "-1"为特殊值，表示使用模型文件中保存的仿真停止时间
-                    app.simIn(index) = app.simIn(index).setModelParameter(...
-                        "StopTime", app.simStopTime);
-                end
-
-                % 设置仿真模式
-                app.simIn(index) = app.simIn(index).setModelParameter('SimulationMode', ...
-                    convertStringsToChars(simModeMap(app.SimModeDropDown.Value)));
-            end
-
-        end
-
 
         function easyPostProcessing(app)
             %% 快捷后处理
+            
+            if isempty(app.outpoartAllTable)
+                return
+            end
+
             poartToProceTable = app.outpoartAllTable(app.outpoartAllTable.(1), :);
             poartsToProceArray = poartToProceTable.Properties.RowNames;
 
@@ -285,90 +290,38 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             TT_fig = stackedplot(timeTableArray{:});
             TT_fig.LegendLabels = paramSetStrArray; % 设置图例
             saveas(TT_fig, 'Result.fig');
-
         end
 
-        function simParamArray = getParsimParamsArray(app)
-            %% 获取用户在界面上配置的并行仿真设置
-            simParamArray = strings;
+        function parSimParamArray = getParsimParamsArray(app)
+            %% 获取用户在界面上配置的 sim/parsim 函数参数
+
+            parSimParamArray = strings;
 
             if app.ShowProgressCheckBox.Value
-                simParamArray = [simParamArray, "ShowProgress", "on"];
+                parSimParamArray = [parSimParamArray, "ShowProgress", "on"];
             else
-                simParamArray = [simParamArray, "ShowProgress", "off"];
+                parSimParamArray = [parSimParamArray, "ShowProgress", "off"];
             end
 
             if app.ShowSimulationManagerCheckBox.Value
-                simParamArray = [simParamArray, "ShowSimulationManager", "on"];
+                parSimParamArray = [parSimParamArray, "ShowSimulationManager", "on"];
             else
-                simParamArray = [simParamArray, "ShowSimulationManager", "off"];
+                parSimParamArray = [parSimParamArray, "ShowSimulationManager", "off"];
             end
 
             if app.StopOnErrorCheckBox.Value
-                simParamArray = [simParamArray, "StopOnError", "on"];
+                parSimParamArray = [parSimParamArray, "StopOnError", "on"];
             else
-                simParamArray = [simParamArray, "StopOnError", "off"];
+                parSimParamArray = [parSimParamArray, "StopOnError", "off"];
             end
 
             if app.UseFastRestartCheckBox.Value
-                simParamArray = [simParamArray, "UseFastRestart", "on"];
+                parSimParamArray = [parSimParamArray, "UseFastRestart", "on"];
             else
-                simParamArray = [simParamArray, "UseFastRestart", "off"];
+                parSimParamArray = [parSimParamArray, "UseFastRestart", "off"];
             end
 
-            simParamArray = simParamArray(2:end);
-        end
-
-        function loadModelParam(app)
-            %% 从模型中读取加载参数信息
-            
-            % 加载模型工作区、获取其中存储的所有变量
-            modelWorkeSpace = get_param(app.simulinkModelFile, 'ModelWorkspace');
-            mdlWsVariables = whos(modelWorkeSpace);
-            
-            paramVariableIndex = zeros(length(mdlWsVariables), 1);
-            for index = 1:length(mdlWsVariables)
-                if startsWith(mdlWsVariables(index).name, app.paramPrefix)
-                   paramVariableIndex(index) = index;
-                end
-            end
-            paramVariableIndex = paramVariableIndex(paramVariableIndex~=0);
-
-            paramVariables = mdlWsVariables(paramVariableIndex); % 结构体数组
-
-            if isempty(paramVariables)
-                uialert(app.UIFigure, "在该 Simulink 模型工作区中找不到参数变量。" + ...
-                    "请重新选择其他模型文件，或根据帮助文档提示修改模型", ...
-                    '错误', 'Icon', 'error');
-                app.showStatusText(['已加载模型 ', app.simulinkModelFile, ...
-                    '，但有错误']);
-                return
-            end
-            
-            paramNames = strings(length(paramVariables), 1);
-            paramDefVals = zeros(length(paramVariables), 1);
-            for index=1:length(paramVariables)
-                % 获取参数名
-                paramNames(index) = erase(paramVariables(index).name, app.paramPrefix);
-                % 获取存储在模型工作区的参数默认值
-                paramDefVals(index) = getVariable(modelWorkeSpace, ...
-                    paramVariables(index).name);
-            end
-
-            % 将参数名添加到选择器下拉控件
-            app.ParamSelector.Items = paramNames;
-
-            % 创建参数数据表与处理参数UI表
-            app.paramAllTable = table(paramDefVals, paramDefVals, ...
-                ones(length(paramNames), 1), false(length(paramNames), 1), ...
-                'RowName', paramNames);
-            app.paramAllTable.Properties.VariableNames = ["min", "max", ...
-                "step", "isToSweep"];
-            app.ParamUITable.RowName = app.paramAllTable.Properties.RowNames;
-            app.paramTableUpdated();
-
-            % 用参数的默认值更新最小/最大/步长输入框
-            app.ParamSelectorValueChanged();
+            parSimParamArray = parSimParamArray(2:end);
         end
 
         function loadSimOutport(app)
@@ -392,11 +345,17 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             for index=1:length(outBlocks)
                 % 获取输出模块中的信号名
                 outportSignalName = get_param(outBlocks(index), 'SignalName');
-                if isempty(outportSignalName)
-                    % 对于未设置输出信号名的端口，以模块名替代
-                    outportSignalName = outBlocks{index};
+
+                % 强制检查输出端口是否设置输出信号名
+                if isempty(outportSignalName{1})
+                    uialert(app.UIFigure, ['输出模块 ', outBlocks{index}, ...
+                        ' 未设置信号名称，需要修改模型，否则无法使用快捷后处理功能。'], ...
+                    '警告', 'Icon', 'warning');
+                    app.showStatusText("模型中部分输出端口未设置信号名称，需要修改。");
+                    return
+                else
+                    outNames(index) = outportSignalName;
                 end
-                outNames(index) = outportSignalName;
             end
 
             % 将参数名添加到表格
@@ -443,11 +402,12 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
                 app.UseFastRestartCheckBox.Enable = "on";
             end
         end
-        
+
         function showStatusText(app, text)
             % 在界面状态栏显示状态提示文本
             app.StatusBarLabel.Text = text;
         end
+
     end
 
     % Callbacks that handle component events
@@ -457,14 +417,14 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
         function startupFcn(app)
             % 整个 APP 启动时的回调函数
 
-            app.UIFigure.Name = "综合Simulink仿真工具";
+            app.UIFigure.Name = "综合Simulink仿真配置工具";
             app.UIFigure.Icon = app.icon;
 
-            % TODO: 通过字符串匹配方式，将帮助文档中的对应内容动态更新为 
+            % TODO: 通过字符串匹配方式，将帮助文档中的对应内容动态更新为
             % app.paramPrefix、app.outportPrefix 的实际值
             % TODO: CSS美化文档
             app.helpDoc = fileread("helpDoc.html", "Encoding", "UTF-8");
-            app.aboutDoc = fileread("aboutDoc.txt", "Encoding", "UTF-8");
+            app.aboutDoc = fileread("aboutDoc.html", "Encoding", "UTF-8");
 
             app.showStatusText("首次启动和加载模型耗时较长，请耐心等待。");
         end
@@ -602,7 +562,6 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             % "暂存按钮"回调函数
 
             if isempty(app.simulinkModelFile) || app.simIsRunning
-                % 若还未加载 Simulink 模型或正在运行仿真，则不做任何事
                 return
             end
 
@@ -644,8 +603,8 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
         function MenuHelpSelected(app, event)
             % "关于" 菜单按钮的回调函数
 
-            uiconfirm(app.UIFigure, app.aboutDoc, ...
-                '关于', 'Icon', app.icon, 'Options', 'OK');
+            uiconfirm(app.UIFigure, app.aboutDoc, '关于', 'Icon', app.icon, ...
+                'Options', 'OK', 'Interpreter', 'html');
         end
 
         % Button pushed function: ParamAllDoneButton
@@ -653,8 +612,13 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             % "参数完成配置"按钮的回调函数
 
             if isempty(app.simulinkModelFile) || app.simIsRunning
-                % 若还未加载 Simulink 模型或正在运行仿真，则不做任何事
                 return
+            end
+
+            function paramSetAllDone(app)
+                app.makeSimIn();
+                app.setSimInParam();
+                app.showStatusText("已完成参数配置");
             end
 
             if app.paramCombinationSum > 200
@@ -663,18 +627,12 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
                     '警告', 'Icon', 'warning', 'Options', {'OK', 'Cancel'});
                 switch userSelection
                     case 'OK'
-                        app.makeSimIn();
-                        app.showStatusText("已完成参数配置");
+                        paramSetAllDone(app);
                     case 'Cancel'
                         return
                 end
-            elseif app.paramCombinationSum < 1
-                uiconfirm(app.UIFigure, "没有有效的参数组合",...
-                    '错误', 'Icon', 'error', 'Options', {'OK'});
-                return
             else
-                app.makeSimIn();
-                app.showStatusText("已完成参数配置");
+                paramSetAllDone(app);
             end
         end
 
@@ -755,7 +713,6 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             % 打开参数组浏览器按钮的回调函数
 
             if isempty(app.simulinkModelFile) || isempty(app.paramAllTable)
-                % 若还未加载 Simulink 模型或参数为空，则不做任何事
                 return
             end
 
@@ -789,6 +746,10 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
         function RunEasyPostProcessButtonPushed(app, event)
             % "运行快捷后处理" 按钮回调函数
 
+            if isempty(app.simulinkModelFile) || app.simIsRunning || isempty(app.simOut)
+                return
+            end
+
             app.showStatusText("正在运行快捷后处理");
             currentPath = pwd();
             if isempty(app.easyPostProceResultPath)
@@ -800,6 +761,7 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             try
                 app.RunEasyPostProcessButton.Enable = "off";
                 app.easyPostProcessing();
+                % FIXME: 即使 easyPostProcessing 直接返回，亦会提示"运行完毕"
                 app.showStatusText("快捷后处理运行完毕");
             catch ME
                 % 异常处理
@@ -834,7 +796,7 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             if isempty(app.simulinkModelFile) || isempty(app.paramAllTable)
                 return
             end
-            
+
             app.ParamAllDoneButtonPushed();
             paramNameArray = app.paramAllTable.Properties.RowNames;
             paramSetTable = getParamSetTable(app.simIn, paramNameArray,...
@@ -877,6 +839,12 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             app.Quit.Tooltip = {'退出程序'};
             app.Quit.Text = '退出';
 
+            % Create Menu
+            app.Menu = uimenu(app.UIFigure);
+            app.Menu.MenuSelectedFcn = createCallbackFcn(app, @OpenParamSetBrowser, true);
+            app.Menu.Tooltip = {'打开参数组浏览器窗口'};
+            app.Menu.Text = '参数组浏览器';
+
             % Create MenuHelp
             app.MenuHelp = uimenu(app.UIFigure);
             app.MenuHelp.Tooltip = {'显示关于信息'};
@@ -891,12 +859,6 @@ classdef SimConfigTool_exported < matlab.apps.AppBase
             app.AboutMenu = uimenu(app.MenuHelp);
             app.AboutMenu.MenuSelectedFcn = createCallbackFcn(app, @MenuHelpSelected, true);
             app.AboutMenu.Text = '关于';
-
-            % Create Menu
-            app.Menu = uimenu(app.UIFigure);
-            app.Menu.MenuSelectedFcn = createCallbackFcn(app, @OpenParamSetBrowser, true);
-            app.Menu.Tooltip = {'打开参数组浏览器窗口'};
-            app.Menu.Text = '参数组浏览器';
 
             % Create GridLayout6
             app.GridLayout6 = uigridlayout(app.UIFigure);
